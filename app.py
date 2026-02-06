@@ -53,7 +53,7 @@ from datetime import datetime, timedelta
 # ============================================================================
 
 # API Key - Hardcoded (works for both YouTube Data API v3 and Gemini)
-GOOGLE_API_KEY = "AIzaSyDuUAfhGWq7Y1l1_UixiKI4nxEKFtDb4zw"
+GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 
 # Institute Keywords for heuristic classification (catches coaching centers before AI call)
 INSTITUTE_KEYWORDS = [
@@ -1325,3 +1325,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
