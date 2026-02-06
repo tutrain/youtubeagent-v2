@@ -62,6 +62,14 @@ INSTITUTE_KEYWORDS = [
     'System', 'Official', 'Centre', 'Learning', 'Foundation'
 ]
 
+# BRAND BLACKLIST: Force-reject these big brands even if they have low subscribers
+BRAND_BLACKLIST = [
+    'PW', 'Physics Wallah', 'Wallah', 'Unacademy', 'Vedantu', 'Byju', 
+    'Allen', 'Adda247', 'Sankalp', 'Magnet Brains', 'Xylem', 'Utkarsh', 
+    'Motion', 'Careerwill', 'Apna College', 'Infinity Learn', 'Doubtnut', 
+    'Mahendra', 'Wi-Fi Study', 'Exampur', 'Next Toppers'
+]
+
 # Hard filter constraints
 MIN_SUBSCRIBERS = 5000
 MAX_SUBSCRIBERS = 500000
@@ -390,20 +398,28 @@ def classify_channel(name: str, description: str, api_key: str) -> str:
     
     We ACCEPT Individual and Small Institute, REJECT only Large Brand.
     
-    KEYWORD HEURISTIC: First checks if channel name contains institute keywords
-    to force "Small Institute" classification for coaching centers.
+    CLASSIFICATION ORDER:
+    Step A: Check Brand Blacklist (case-insensitive) - returns "Large Brand" immediately
+    Step B: Check Institute Keywords (case-insensitive) - forces "Small Institute"
+    Step C: Gemini AI classification
     """
     
-    # ==== STEP A: Keyword Heuristic Check (Pre-AI) ====
-    # Check if channel name contains any institute keywords (case-insensitive)
     name_lower = name.lower()
-    has_institute_keyword = any(keyword.lower() in name_lower for keyword in INSTITUTE_KEYWORDS)
     
-    # ==== STEP B: If keyword found, force "Small Institute" ====
+    # ==== STEP A: Brand Blacklist Check (Strict Priority) ====
+    # Check if channel name contains any blacklisted brand (case-insensitive)
+    has_blacklist_brand = any(brand.lower() in name_lower for brand in BRAND_BLACKLIST)
+    if has_blacklist_brand:
+        return "Large Brand"
+    
+    # ==== STEP B: Institute Keywords Heuristic Check ====
+    # Check if channel name contains any institute keywords (case-insensitive)
+    has_institute_keyword = any(keyword.lower() in name_lower for keyword in INSTITUTE_KEYWORDS)
     if has_institute_keyword:
         return "Small Institute"
     
-    # ==== STEP C: No keyword found, proceed with Gemini AI classification ====
+    # ==== STEP C: Gemini AI Classification ====
+    # No blacklist or keyword match, proceed with AI classification
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
