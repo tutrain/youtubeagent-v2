@@ -1,19 +1,14 @@
 """
-TuTrain Educator Discovery Engine - Phase 10 (Robust Contacts & Blacklist)
+TuTrain Educator Discovery Engine - Phase 11 (Final Link Fixes)
 ================================================================
 A Streamlit app with Deep Filtering pagination that ensures
 target lead counts are met with FULLY APPROVED channels.
 
-Phase 10 Upgrades:
-- Robust Regex for Contact Extraction (Handles hyphens, dots, invite links)
-- Added WhatsApp extraction support
-- Brand Blacklist to filter out big ed-tech sub-channels
-- Improved "Small Institute" classification logic
-
-Phase 9 CSV Deduplication (Preserved):
-- Upload Master Lead File (CSV) to exclude previously discovered channels
-- Early deduplication check BEFORE expensive AI/Activity calls
-- Channel ID in CSV export for future-proofing
+Phase 11 Upgrades:
+- Added Facebook & Twitter columns to the CSV export (previously missing)
+- "Greedy" Regex patterns to catch links without 'https://'
+- Special support for 'linktr.ee' and 'play.google.com' in Website column
+- Relaxed username matching to ensure KMD Saharanpur links are caught
 
 API Limits:
 - YouTube Data API: 10,000 units/day
@@ -58,7 +53,7 @@ except:
     # Fallback if secrets are not set up locally
     GOOGLE_API_KEY = "ENTER_YOUR_API_KEY_HERE"
 
-# Institute Keywords (Updated to singular 'Tutorial')
+# Institute Keywords (Singular 'Tutorial')
 INSTITUTE_KEYWORDS = [
     'Academy', 'Institute', 'Classes', 'Coaching', 'Tutorial', 'School', 
     'Education', 'Center', 'Hub', 'Campus', 'Group', 'Team', 
@@ -161,13 +156,13 @@ def load_existing_leads(uploaded_file) -> tuple:
 
 
 # ============================================================================
-# ROBUST CONTACT EXTRACTION (Updated)
+# ROBUST CONTACT EXTRACTION (Phase 11 Update)
 # ============================================================================
 
 def extract_contacts(description: str) -> dict:
     """
-    Extract contact information using ROBUST regex patterns.
-    Handles hyphens, dots, invite links, and WhatsApp.
+    Extract contact information using GREEDY regex patterns.
+    Captures links even without 'https://' and handles special domains.
     """
     if not description:
         description = ""
@@ -189,12 +184,10 @@ def extract_contacts(description: str) -> dict:
     if valid_emails:
         contacts["email"] = ", ".join(list(set(valid_emails))[:3])
     
-    # 2. WhatsApp (NEW: Chat links & wa.me)
-    # Matches chat.whatsapp.com/XYZ and wa.me/12345
+    # 2. WhatsApp (Chat links & wa.me)
     wa_pattern = r'(?:https?://)?(?:www\.)?(?:chat\.whatsapp\.com/[a-zA-Z0-9_]+|wa\.me/[0-9]+)'
     wa_matches = re.findall(wa_pattern, description, re.IGNORECASE)
     if wa_matches:
-        # Clean: Ensure they start with https:// for clickable links
         clean_wa = []
         for w in wa_matches:
             w_clean = w.strip('.,;:!?')
@@ -203,50 +196,58 @@ def extract_contacts(description: str) -> dict:
             clean_wa.append(w_clean)
         contacts["whatsapp"] = ", ".join(list(set(clean_wa))[:2])
 
-    # 3. Instagram (Allow dots AND hyphens)
-    # Matches instagram.com/username
-    insta_pattern = r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.-]+)'
+    # 3. Instagram (Greedy Match)
+    # Matches instagram.com/USERNAME (stops at space or ?)
+    insta_pattern = r'instagram\.com/([^/\s?]+)'
     insta_matches = re.findall(insta_pattern, description, re.IGNORECASE)
     if insta_matches:
-        clean_insta = [f"instagram.com/{u.strip('.,;:!?/')}" for u in insta_matches if len(u) > 1]
+        clean_insta = [f"instagram.com/{u.strip('.,;:!?')}" for u in insta_matches if len(u) > 1]
         contacts["instagram"] = ", ".join(list(set(clean_insta))[:2])
     
-    # 4. Telegram (Allow joinchat and invite links)
-    # Matches t.me/username OR t.me/joinchat/XYZ
-    tg_pattern = r'(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_/\.-]+)'
+    # 4. Telegram (Greedy Match)
+    tg_pattern = r'(?:t\.me|telegram\.me)/([^/\s?]+)'
     tg_matches = re.findall(tg_pattern, description, re.IGNORECASE)
     if tg_matches:
-        clean_tg = []
-        for u in tg_matches:
-            u_clean = u.strip('.,;:!?/')
-            # If it's a join link, keep the full path
-            if len(u_clean) > 2:
-                clean_tg.append(f"t.me/{u_clean}")
+        clean_tg = [f"t.me/{u.strip('.,;:!?')}" for u in tg_matches if len(u) > 1]
         contacts["telegram"] = ", ".join(list(set(clean_tg))[:2])
     
-    # 5. Facebook (Allow hyphens and IDs)
-    fb_pattern = r'(?:https?://)?(?:www\.)?(?:facebook\.com|fb\.com)/([a-zA-Z0-9_.-]+)'
+    # 5. Facebook (Greedy Match)
+    fb_pattern = r'(?:facebook\.com|fb\.com)/([^/\s?]+)'
     fb_matches = re.findall(fb_pattern, description, re.IGNORECASE)
     if fb_matches:
-        clean_fb = [f"facebook.com/{u.strip('.,;:!?/')}" for u in fb_matches if len(u) > 1]
+        clean_fb = [f"facebook.com/{u.strip('.,;:!?')}" for u in fb_matches if len(u) > 1]
         contacts["facebook"] = ", ".join(list(set(clean_fb))[:2])
     
-    # 6. Twitter/X (Standard)
-    twitter_pattern = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/([a-zA-Z0-9_]+)'
+    # 6. Twitter/X (Greedy Match)
+    twitter_pattern = r'(?:twitter\.com|x\.com)/([^/\s?]+)'
     twitter_matches = re.findall(twitter_pattern, description, re.IGNORECASE)
     if twitter_matches:
-        clean_tw = [f"twitter.com/{u.strip('.,;:!?/')}" for u in twitter_matches if len(u) > 1 and u.lower() not in ['intent', 'share']]
+        clean_tw = [f"twitter.com/{u.strip('.,;:!?')}" for u in twitter_matches if len(u) > 1]
         contacts["twitter"] = ", ".join(list(set(clean_tw))[:2])
 
-    # 7. Website (Generic)
-    # Exclude the social domains we already handled
+    # 7. Website (Generic + Linktree + Play Store)
+    websites = []
+    
+    # A. Linktree (Explicit check)
+    lt_pattern = r'linktr\.ee/([^/\s?]+)'
+    lt_matches = re.findall(lt_pattern, description, re.IGNORECASE)
+    for lt in lt_matches:
+        websites.append(f"linktr.ee/{lt}")
+
+    # B. Google Play Store (App links)
+    ps_pattern = r'play\.google\.com/store/apps/details\?id=([^&\s]+)'
+    ps_matches = re.findall(ps_pattern, description, re.IGNORECASE)
+    for ps in ps_matches:
+        websites.append(f"play.google.com/store/apps/details?id={ps}")
+
+    # C. Generic URLs (Must have http/https)
     social_domains = ['instagram', 't.me', 'telegram', 'facebook', 'fb.com', 
-                      'twitter', 'x.com', 'youtube', 'youtu.be', 'whatsapp', 'wa.me']
+                      'twitter', 'x.com', 'youtube', 'youtu.be', 'whatsapp', 'wa.me',
+                      'linktr.ee', 'play.google.com'] # Exclude ones we handled
     
     website_pattern = r'https?://(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+(?:/[^\s<>\"\']*)?)'
     all_urls = re.findall(website_pattern, description, re.IGNORECASE)
     
-    websites = []
     for url in all_urls:
         url_clean = url.strip('.,;:!?/\'"')
         is_social = any(domain in url_clean.lower() for domain in social_domains)
@@ -254,7 +255,7 @@ def extract_contacts(description: str) -> dict:
             websites.append(url_clean)
     
     if websites:
-        contacts["website"] = ", ".join(websites[:2])
+        contacts["website"] = ", ".join(list(set(websites))[:2])
     
     return contacts
 
@@ -1038,7 +1039,7 @@ def main():
     st.markdown("""
         <div class="main-header">
             <h1>🎓 TuTrain Educator Discovery Engine</h1>
-            <p>Phase 10: Robust Contact Extraction & Brand Filtering</p>
+            <p>Phase 11: Robust Links (Facebook, Twitter, Linktree, Play Store)</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -1108,12 +1109,12 @@ def main():
         
         st.divider()
         
-        st.subheader("🆕 Phase 10 Features")
+        st.subheader("🆕 Phase 11 Features")
         st.markdown("""
-        ✅ **WhatsApp** Extraction  
-        ✅ **Brand Blacklist** (No PW/Unacademy)  
-        ✅ **Robust Links** (Hyphen/Dot fix)  
-        ✅ **Smart Labeling** (Tutorial vs Tutorials)
+        ✅ **All Social Columns** (FB, Twitter)  
+        ✅ **Linktree Support** (No http needed)  
+        ✅ **App Store Support** (No http needed)  
+        ✅ **Greedy Link Matching**
         """)
     
     # Main content
@@ -1193,7 +1194,7 @@ def main():
         
         st.success(f"✅ Found {len(results)} approved educators! ({active_count} active, {rejected_count} inactive)")
         
-        # Format display DataFrame (Added WhatsApp)
+        # Format display DataFrame (Added FB/Twitter)
         display_df = pd.DataFrame({
             "Subject Tag": df["subject_tag"],
             "Channel Name": df["name"],
@@ -1206,6 +1207,8 @@ def main():
             "WhatsApp": df["whatsapp"].fillna(""),
             "Instagram": df["instagram"].fillna(""),
             "Telegram": df["telegram"].fillna(""),
+            "Facebook": df["facebook"].fillna(""),
+            "Twitter": df["twitter"].fillna(""),
             "Website": df["website"].fillna(""),
             "Status": df["status"],
             "Reason": df["reason"].fillna(""),
@@ -1237,7 +1240,7 @@ def main():
         with col4:
             st.metric("Tier D", len(df[df["tier"] == "D"]), help="Inactive")
         
-        # Export (Added WhatsApp)
+        # Export (Added FB/Twitter)
         st.divider()
         
         export_df = pd.DataFrame({
@@ -1253,6 +1256,8 @@ def main():
             "WhatsApp": df["whatsapp"].fillna(""),
             "Instagram": df["instagram"].fillna(""),
             "Telegram": df["telegram"].fillna(""),
+            "Facebook": df["facebook"].fillna(""),
+            "Twitter": df["twitter"].fillna(""),
             "Website": df["website"].fillna(""),
             "Status": df["status"],
             "Reason": df["reason"].fillna(""),
