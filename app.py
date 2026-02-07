@@ -1,20 +1,19 @@
 """
-TuTrain Educator Discovery Engine - Phase 9 (CSV Deduplication)
+TuTrain Educator Discovery Engine - Phase 10 (Robust Contacts & Blacklist)
 ================================================================
 A Streamlit app with Deep Filtering pagination that ensures
 target lead counts are met with FULLY APPROVED channels.
 
-Phase 9 CSV Deduplication Upgrades:
+Phase 10 Upgrades:
+- Robust Regex for Contact Extraction (Handles hyphens, dots, invite links)
+- Added WhatsApp extraction support
+- Brand Blacklist to filter out big ed-tech sub-channels
+- Improved "Small Institute" classification logic
+
+Phase 9 CSV Deduplication (Preserved):
 - Upload Master Lead File (CSV) to exclude previously discovered channels
 - Early deduplication check BEFORE expensive AI/Activity calls
 - Channel ID in CSV export for future-proofing
-- Target count applies to NEW UNIQUE leads only
-
-Phase 8 Deep Filtering Features (preserved):
-- AI classification + activity checks INSIDE the fetch loop
-- Dynamic query rotation when primary query exhausts
-- Quota protection with safety limits
-- UI shows "Approved vs Scanned" progress
 
 API Limits:
 - YouTube Data API: 10,000 units/day
@@ -22,7 +21,7 @@ API Limits:
 """
 
 # ============================================================================
-# WARNING SUPPRESSION - Must be at the very top before other imports trigger warnings
+# WARNING SUPPRESSION
 # ============================================================================
 import warnings
 import os
@@ -52,10 +51,14 @@ from datetime import datetime, timedelta
 # CONFIGURATION
 # ============================================================================
 
-# API Key - Hardcoded (works for both YouTube Data API v3 and Gemini)
-GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+# API Key
+try:
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+except:
+    # Fallback if secrets are not set up locally
+    GOOGLE_API_KEY = "ENTER_YOUR_API_KEY_HERE"
 
-# Institute Keywords for heuristic classification (catches coaching centers before AI call)
+# Institute Keywords (Updated to singular 'Tutorial')
 INSTITUTE_KEYWORDS = [
     'Academy', 'Institute', 'Classes', 'Coaching', 'Tutorial', 'School', 
     'Education', 'Center', 'Hub', 'Campus', 'Group', 'Team', 
@@ -92,19 +95,13 @@ REGION_CODE = "IN"
 
 
 # ============================================================================
-# QUERY VARIANT GENERATOR (NEW - Phase 8)
+# QUERY VARIANT GENERATOR
 # ============================================================================
 
 def generate_query_variants(subject: str) -> list:
     """
     Generate search query variants for dynamic rotation.
     Returns list of queries to try when primary query exhausts results.
-    
-    Args:
-        subject: Primary subject to search
-        
-    Returns:
-        List of query variants to rotate through
     """
     base = subject.strip()
     variants = [
@@ -123,22 +120,12 @@ def generate_query_variants(subject: str) -> list:
 
 
 # ============================================================================
-# CSV DEDUPLICATION (NEW - Phase 9)
+# CSV DEDUPLICATION
 # ============================================================================
 
 def load_existing_leads(uploaded_file) -> tuple:
     """
     Load existing leads from an uploaded CSV file for deduplication.
-    
-    Args:
-        uploaded_file: Streamlit UploadedFile object
-        
-    Returns:
-        Tuple of (existing_links_set, existing_ids_set, count, error_message)
-        - existing_links_set: Set of channel links (normalized)
-        - existing_ids_set: Set of channel IDs (if available)
-        - count: Number of leads loaded
-        - error_message: Error string if any issue, else empty string
     """
     existing_links = set()
     existing_ids = set()
@@ -174,19 +161,13 @@ def load_existing_leads(uploaded_file) -> tuple:
 
 
 # ============================================================================
-# STRICT CONTACT EXTRACTION
+# ROBUST CONTACT EXTRACTION (Updated)
 # ============================================================================
 
 def extract_contacts(description: str) -> dict:
     """
-    Extract contact information using STRICT regex patterns.
-    Only matches properly formatted URLs/links, not random text.
-    
-    Args:
-        description: Channel description text
-        
-    Returns:
-        Dictionary with keys: email, instagram, telegram, facebook, twitter, website
+    Extract contact information using ROBUST regex patterns.
+    Handles hyphens, dots, invite links, and WhatsApp.
     """
     if not description:
         description = ""
@@ -197,66 +178,79 @@ def extract_contacts(description: str) -> dict:
         "telegram": "",
         "facebook": "",
         "twitter": "",
+        "whatsapp": "",
         "website": ""
     }
     
-    # Email pattern - standard format
+    # 1. Email (Standard)
     email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     emails = re.findall(email_pattern, description, re.IGNORECASE)
-    # Filter out common false positives
-    valid_emails = [e.strip('.,;:!?') for e in emails if not e.endswith('.jpg') and not e.endswith('.png')]
+    valid_emails = [e.strip('.,;:!?') for e in emails if not e.endswith(('.jpg', '.png', '.gif'))]
     if valid_emails:
         contacts["email"] = ", ".join(list(set(valid_emails))[:3])
     
-    # Instagram - STRICT: must have instagram.com/
-    insta_pattern = r'(?:https?://)?(?:www\.)?instagram\.com/([\w\.]+)'
+    # 2. WhatsApp (NEW: Chat links & wa.me)
+    # Matches chat.whatsapp.com/XYZ and wa.me/12345
+    wa_pattern = r'(?:https?://)?(?:www\.)?(?:chat\.whatsapp\.com/[a-zA-Z0-9_]+|wa\.me/[0-9]+)'
+    wa_matches = re.findall(wa_pattern, description, re.IGNORECASE)
+    if wa_matches:
+        # Clean: Ensure they start with https:// for clickable links
+        clean_wa = []
+        for w in wa_matches:
+            w_clean = w.strip('.,;:!?')
+            if not w_clean.startswith('http'):
+                w_clean = f"https://{w_clean}"
+            clean_wa.append(w_clean)
+        contacts["whatsapp"] = ", ".join(list(set(clean_wa))[:2])
+
+    # 3. Instagram (Allow dots AND hyphens)
+    # Matches instagram.com/username
+    insta_pattern = r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.-]+)'
     insta_matches = re.findall(insta_pattern, description, re.IGNORECASE)
     if insta_matches:
-        # Clean and deduplicate
-        clean_insta = [u.strip('.,;:!?/') for u in insta_matches if len(u) > 1]
-        if clean_insta:
-            contacts["instagram"] = ", ".join([f"instagram.com/{u}" for u in list(set(clean_insta))[:2]])
+        clean_insta = [f"instagram.com/{u.strip('.,;:!?/')}" for u in insta_matches if len(u) > 1]
+        contacts["instagram"] = ", ".join(list(set(clean_insta))[:2])
     
-    # Telegram - STRICT: must have t.me/ or telegram.me/
-    telegram_pattern = r'(?:https?://)?(?:t\.me|telegram\.me)/([\w_]+)'
-    telegram_matches = re.findall(telegram_pattern, description, re.IGNORECASE)
-    if telegram_matches:
-        clean_tg = [u.strip('.,;:!?/') for u in telegram_matches if len(u) > 1]
-        if clean_tg:
-            contacts["telegram"] = ", ".join([f"t.me/{u}" for u in list(set(clean_tg))[:2]])
+    # 4. Telegram (Allow joinchat and invite links)
+    # Matches t.me/username OR t.me/joinchat/XYZ
+    tg_pattern = r'(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_/\.-]+)'
+    tg_matches = re.findall(tg_pattern, description, re.IGNORECASE)
+    if tg_matches:
+        clean_tg = []
+        for u in tg_matches:
+            u_clean = u.strip('.,;:!?/')
+            # If it's a join link, keep the full path
+            if len(u_clean) > 2:
+                clean_tg.append(f"t.me/{u_clean}")
+        contacts["telegram"] = ", ".join(list(set(clean_tg))[:2])
     
-    # Facebook - STRICT: must have facebook.com/
-    fb_pattern = r'(?:https?://)?(?:www\.)?facebook\.com/([\w\.]+)'
+    # 5. Facebook (Allow hyphens and IDs)
+    fb_pattern = r'(?:https?://)?(?:www\.)?(?:facebook\.com|fb\.com)/([a-zA-Z0-9_.-]+)'
     fb_matches = re.findall(fb_pattern, description, re.IGNORECASE)
     if fb_matches:
-        clean_fb = [u.strip('.,;:!?/') for u in fb_matches if len(u) > 1]
-        if clean_fb:
-            contacts["facebook"] = ", ".join([f"facebook.com/{u}" for u in list(set(clean_fb))[:2]])
+        clean_fb = [f"facebook.com/{u.strip('.,;:!?/')}" for u in fb_matches if len(u) > 1]
+        contacts["facebook"] = ", ".join(list(set(clean_fb))[:2])
     
-    # Twitter/X - STRICT: must have twitter.com/ or x.com/
-    twitter_pattern = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/([\w_]+)'
+    # 6. Twitter/X (Standard)
+    twitter_pattern = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/([a-zA-Z0-9_]+)'
     twitter_matches = re.findall(twitter_pattern, description, re.IGNORECASE)
     if twitter_matches:
-        clean_tw = [u.strip('.,;:!?/') for u in twitter_matches if len(u) > 1 and u.lower() not in ['intent', 'share']]
-        if clean_tw:
-            contacts["twitter"] = ", ".join([f"twitter.com/{u}" for u in list(set(clean_tw))[:2]])
+        clean_tw = [f"twitter.com/{u.strip('.,;:!?/')}" for u in twitter_matches if len(u) > 1 and u.lower() not in ['intent', 'share']]
+        contacts["twitter"] = ", ".join(list(set(clean_tw))[:2])
+
+    # 7. Website (Generic)
+    # Exclude the social domains we already handled
+    social_domains = ['instagram', 't.me', 'telegram', 'facebook', 'fb.com', 
+                      'twitter', 'x.com', 'youtube', 'youtu.be', 'whatsapp', 'wa.me']
     
-    # Website - STRICT: MUST start with http:// or https://
-    # Only match full URLs, not bare domains
     website_pattern = r'https?://(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+(?:/[^\s<>\"\']*)?)'
     all_urls = re.findall(website_pattern, description, re.IGNORECASE)
-    
-    # Filter out social media domains
-    social_domains = ['instagram.com', 't.me', 'telegram.me', 'facebook.com', 
-                      'twitter.com', 'x.com', 'youtube.com', 'youtu.be', 
-                      'fb.com', 'wa.me', 'whatsapp.com', 'bit.ly', 'goo.gl',
-                      'tinyurl.com', 'linktr.ee', 'docs.google.com']
     
     websites = []
     for url in all_urls:
         url_clean = url.strip('.,;:!?/\'"')
         is_social = any(domain in url_clean.lower() for domain in social_domains)
-        if not is_social and url_clean not in websites and len(url_clean) > 5:
+        if not is_social and url_clean not in websites and len(url_clean) > 4:
             websites.append(url_clean)
     
     if websites:
@@ -362,12 +356,15 @@ def calculate_tier(is_active: bool, contacts: dict, avg_views: int, subscribers:
     
     has_email = bool(contacts.get("email"))
     has_telegram = bool(contacts.get("telegram"))
+    
+    # Check all contacts (Updated to include WhatsApp)
     has_any_contact = any([
         contacts.get("email"),
         contacts.get("instagram"),
         contacts.get("telegram"),
         contacts.get("facebook"),
         contacts.get("twitter"),
+        contacts.get("whatsapp"),
         contacts.get("website")
     ])
     
@@ -383,8 +380,6 @@ def calculate_tier(is_active: bool, contacts: dict, avg_views: int, subscribers:
     return "C"
 
 
-
-
 # ============================================================================
 # GEMINI CLASSIFICATION
 # ============================================================================
@@ -395,8 +390,6 @@ def classify_channel(name: str, description: str, api_key: str) -> str:
     - Individual: Single teacher/educator
     - Small Institute: Small coaching center, 2-3 teachers, local academy
     - Large Brand: Big EdTech (Byju's, Unacademy), News channels, media aggregators
-    
-    We ACCEPT Individual and Small Institute, REJECT only Large Brand.
     
     STRICT PRIORITY ORDER:
     1. Check Brand Blacklist FIRST (force-reject big brands)
@@ -458,7 +451,7 @@ Category:"""
 
 
 # ============================================================================
-# DEEP FILTERING FETCH (REFACTORED - Phase 8)
+# DEEP FILTERING FETCH
 # ============================================================================
 
 def smart_fetch_channels(
@@ -471,32 +464,7 @@ def smart_fetch_channels(
     existing_links: set = None
 ) -> list:
     """
-    Deep Filtering Fetch Loop: Continues fetching and filtering until we have
-    enough FULLY APPROVED channels (passed ALL criteria).
-    
-    Phase 9 Changes:
-    - CSV-based deduplication via existing_links parameter
-    - Early duplicate check BEFORE expensive AI/Activity calls
-    - Target count applies to NEW UNIQUE leads only
-    
-    Phase 8 Features (preserved):
-    - AI Classification runs INSIDE the loop
-    - Activity Check runs INSIDE the loop
-    - Only counts channels that pass ALL filters
-    - Dynamic query rotation when primary query exhausts
-    - Quota protection with safety limits
-    
-    Args:
-        youtube: YouTube API client
-        subject: Search query
-        target_count: Number of APPROVED channels needed
-        gemini_api_key: API key for Gemini classification
-        status_container: Streamlit status container for progress updates
-        existing_channel_ids: Optional set of channel IDs to skip (deduplication)
-        existing_links: Optional set of channel links to skip (CSV deduplication)
-        
-    Returns:
-        List of FULLY APPROVED channel dictionaries
+    Deep Filtering Fetch Loop.
     """
     approved_channels = []
     seen_channel_ids = existing_channel_ids.copy() if existing_channel_ids else set()
@@ -623,7 +591,7 @@ def smart_fetch_channels(
                     rejected_basic_filter += 1
                     continue
                 
-                # ============ CSV DEDUPLICATION (Phase 9 - Early Check!) ============
+                # ============ CSV DEDUPLICATION ============
                 # Generate channel link to check against existing leads
                 custom_url_check = snippet.get("customUrl", "")
                 if custom_url_check:
@@ -636,7 +604,7 @@ def smart_fetch_channels(
                     status_container.write(f"  ⏭️ {channel_name[:25]}... → Already in Master CSV")
                     continue
                 
-                # ============ AI CLASSIFICATION (Inside Loop!) ============
+                # ============ AI CLASSIFICATION ============
                 gemini_calls += 1
                 classification = classify_channel(channel_name, full_description, gemini_api_key)
                 
@@ -646,7 +614,7 @@ def smart_fetch_channels(
                     time.sleep(1)  # Rate limit for Gemini
                     continue
                 
-                # ============ ACTIVITY CHECK (Inside Loop!) ============
+                # ============ ACTIVITY CHECK ============
                 uploads_playlist_id = content_details.get("relatedPlaylists", {}).get("uploads", "")
                 activity = check_channel_activity(youtube, uploads_playlist_id)
                 
@@ -764,12 +732,6 @@ def get_api_key():
 def render_kpi_metrics(df: pd.DataFrame):
     """
     Render the KPI Metrics row at the top of the dashboard.
-    
-    Displays:
-    - Total Found: Total rows fetched
-    - Approved Leads: Count of Status == 'Approved'
-    - Avg Subscribers: Mean of Approved channels
-    - Avg Engagement: Mean of Avg Views for Approved channels
     """
     approved_df = df[df["status"] == "Approved"]
     
@@ -824,9 +786,6 @@ def render_kpi_metrics(df: pd.DataFrame):
 def render_quality_map(df: pd.DataFrame):
     """
     Render the Quality Map scatter plot.
-    
-    Shows Subscribers vs Avg Views for Approved channels,
-    colored by Tier to help spot high-engagement, low-subscriber gems.
     """
     approved_df = df[df["status"] == "Approved"].copy()
     
@@ -904,9 +863,6 @@ def render_quality_map(df: pd.DataFrame):
 def render_pipeline_distribution(df: pd.DataFrame):
     """
     Render the Pipeline Distribution donut chart.
-    
-    Shows the breakdown by Status (Approved vs Rejected) and a secondary
-    donut for Tier distribution among approved leads.
     """
     # Status Distribution Donut
     status_counts = df["status"].value_counts().reset_index()
@@ -1082,7 +1038,7 @@ def main():
     st.markdown("""
         <div class="main-header">
             <h1>🎓 TuTrain Educator Discovery Engine</h1>
-            <p>Phase 9: CSV Deduplication - Skip channels you already have!</p>
+            <p>Phase 10: Robust Contact Extraction & Brand Filtering</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -1119,7 +1075,7 @@ def main():
         
         st.subheader("📊 Tier Scoring")
         st.markdown("""
-        **A** 🟢 Email/Telegram + Engaged  
+        **A** 🟢 Email/Telegram/WhatsApp + Engaged  
         **B** 🔵 Has Contact Info  
         **C** 🟡 Active, No Contact  
         **D** 🔴 Inactive
@@ -1152,12 +1108,12 @@ def main():
         
         st.divider()
         
-        st.subheader("🆕 Phase 9 Features")
+        st.subheader("🆕 Phase 10 Features")
         st.markdown("""
-        ✅ **CSV Deduplication** upload  
-        ✅ **Early Skip** before AI calls  
-        ✅ **Channel ID** in export  
-        ✅ All Phase 8 features preserved
+        ✅ **WhatsApp** Extraction  
+        ✅ **Brand Blacklist** (No PW/Unacademy)  
+        ✅ **Robust Links** (Hyphen/Dot fix)  
+        ✅ **Smart Labeling** (Tutorial vs Tutorials)
         """)
     
     # Main content
@@ -1174,11 +1130,11 @@ def main():
         
         youtube = build(YOUTUBE_API_SERVICE, YOUTUBE_API_VERSION, developerKey=api_key)
         
-        # Phase 1+2 Combined: Deep Filtering Fetch
+        # Deep Filtering Fetch
         with st.status("🔍 Deep Filtering Search...", expanded=True) as status:
             status.write("Starting Deep Filtering loop (AI + Activity checks inside)...")
             
-            # Get existing links from session state (Phase 9 deduplication)
+            # Get existing links from session state (Deduplication)
             existing_links_from_csv = st.session_state.get("existing_links", set())
             
             # All returned channels are FULLY APPROVED (and unique from CSV)
@@ -1204,7 +1160,7 @@ def main():
         df = pd.DataFrame(results)
         
         # =====================================================================
-        # PHASE 7: INTERACTIVE DASHBOARD
+        # INTERACTIVE DASHBOARD
         # =====================================================================
         
         st.markdown("---")
@@ -1237,7 +1193,7 @@ def main():
         
         st.success(f"✅ Found {len(results)} approved educators! ({active_count} active, {rejected_count} inactive)")
         
-        # Format display DataFrame with PHASE 6 column order
+        # Format display DataFrame (Added WhatsApp)
         display_df = pd.DataFrame({
             "Subject Tag": df["subject_tag"],
             "Channel Name": df["name"],
@@ -1247,6 +1203,7 @@ def main():
             "Total Views": df["total_views"].apply(format_number),
             "Avg Views": df["avg_views"].apply(format_number),
             "Email": df["email"].fillna(""),
+            "WhatsApp": df["whatsapp"].fillna(""),
             "Instagram": df["instagram"].fillna(""),
             "Telegram": df["telegram"].fillna(""),
             "Website": df["website"].fillna(""),
@@ -1280,20 +1237,20 @@ def main():
         with col4:
             st.metric("Tier D", len(df[df["tier"] == "D"]), help="Inactive")
         
-        # Export with PHASE 6 column order
+        # Export (Added WhatsApp)
         st.divider()
         
-        # Phase 9: Added Channel ID column for future deduplication accuracy
         export_df = pd.DataFrame({
             "Subject Tag": df["subject_tag"],
             "Channel Name": df["name"],
-            "Channel ID": df["channel_id"],  # Phase 9: For accurate deduplication
+            "Channel ID": df["channel_id"],
             "Channel Link": df["channel_link"],
             "Type": df["classification"],
             "Subscribers": df["subscribers"],
             "Total Views": df["total_views"],
             "Avg Views": df["avg_views"],
             "Email": df["email"].fillna(""),
+            "WhatsApp": df["whatsapp"].fillna(""),
             "Instagram": df["instagram"].fillna(""),
             "Telegram": df["telegram"].fillna(""),
             "Website": df["website"].fillna(""),
@@ -1325,4 +1282,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
