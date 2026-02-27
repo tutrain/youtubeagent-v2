@@ -88,6 +88,38 @@ YOUTUBE_API_SERVICE = "youtube"
 YOUTUBE_API_VERSION = "v3"
 REGION_CODE = "IN"
 
+# PAKISTAN CHANNEL BLOCKING
+# Keywords in channel name/description/country that indicate a Pakistani channel
+PAKISTAN_KEYWORDS = [
+    'pakistan', 'pakistani', 'lahore', 'karachi', 'islamabad', 'rawalpindi',
+    'peshawar', 'faisalabad', 'multan', 'sialkot', 'quetta', 'hyderabad pk',
+    'sindh', 'punjab pakistan', 'balochistan', 'khyber', 'matric', 'inter part',
+    'fbise', 'bise', 'kpk', 'pindi'
+]
+
+
+# ============================================================================
+# PAKISTAN CHANNEL DETECTION
+# ============================================================================
+
+def is_pakistani_channel(channel_name: str, description: str, country: str = "") -> bool:
+    """
+    Detect if a channel is Pakistan-based using country code, name, and description.
+    Returns True if the channel appears to be Pakistani.
+    """
+    # 1. Check country code (most reliable - from YouTube API)
+    if country and country.upper() == "PK":
+        return True
+    
+    # 2. Check channel name and description for Pakistan keywords
+    text_to_check = f"{channel_name} {description}".lower()
+    
+    for keyword in PAKISTAN_KEYWORDS:
+        if keyword.lower() in text_to_check:
+            return True
+    
+    return False
+
 
 # ============================================================================
 # QUERY VARIANT GENERATOR
@@ -484,6 +516,7 @@ def smart_fetch_channels(
     rejected_inactive = 0
     rejected_duplicate_csv = 0
     rejected_basic_filter = 0
+    rejected_pakistan = 0
     
     next_page_token = None
     
@@ -579,10 +612,17 @@ def smart_fetch_channels(
                 
                 channel_id = channel["id"]
                 channel_name = snippet.get("title", "Unknown")
+                channel_country = snippet.get("country", "")
                 subscriber_count = int(stats.get("subscriberCount", 0))
                 video_count = int(stats.get("videoCount", 0))
                 view_count = int(stats.get("viewCount", 0))
                 full_description = snippet.get("description", "")
+                
+                # ============ PAKISTAN BLOCK (FIRST CHECK) ============
+                if is_pakistani_channel(channel_name, full_description, channel_country):
+                    rejected_pakistan += 1
+                    status_container.write(f"  🚫 {channel_name[:25]}... → Blocked (Pakistan)")
+                    continue
                 
                 # ============ BASIC FILTERS ============
                 if subscriber_count < MIN_SUBSCRIBERS or subscriber_count > MAX_SUBSCRIBERS:
@@ -702,7 +742,8 @@ def smart_fetch_channels(
     status_container.write(f"   ❌ Rejected (Large Brand): {rejected_large_brand}")
     status_container.write(f"   ⏸️ Rejected (Inactive): {rejected_inactive}")
     status_container.write(f"   🔢 Rejected (Basic Filters): {rejected_basic_filter}")
-    status_container.write(f"   📡 API Pages Used: {pages_fetched}")
+    status_container.write(f"   � Rejected (Pakistan): {rejected_pakistan}")
+    status_container.write(f"   �📡 API Pages Used: {pages_fetched}")
     status_container.write(f"   🤖 Gemini Calls: {gemini_calls}")
     
     return approved_channels
